@@ -521,6 +521,123 @@ class Task(object):
 
         return is_task_done.value
 
+    def read_all(self, number_of_samples_per_channel=-1, timeout=10.0):
+        channels_to_read = self.in_stream.channels_to_read
+        number_of_channels = len(channels_to_read.channel_names)
+        read_chan_type = channels_to_read.chan_type
+
+        num_samples_not_set = (number_of_samples_per_channel is
+                               NUM_SAMPLES_UNSET)
+
+        # Determine the array shape and size to create
+        buffer_length = self.timing.samp_quant_samp_per_chan
+        if number_of_channels > 1:
+            if not num_samples_not_set:
+                array_shape = (number_of_channels,
+                               buffer_length)
+            else:
+                array_shape = buffer_length
+        else:
+            array_shape = number_of_samples_per_channel
+
+        # Analog Input
+        if read_chan_type == ChannelType.ANALOG_INPUT:
+            data = numpy.zeros(array_shape, dtype=numpy.float64)
+            data[:] = numpy.nan
+            samples_read = _read_analog_f_64(
+                self._handle, data, number_of_samples_per_channel, timeout)
+
+        # Digital Input or Digital Output
+        elif (read_chan_type == ChannelType.DIGITAL_INPUT or
+                      read_chan_type == ChannelType.DIGITAL_OUTPUT):
+            if self.in_stream.di_num_booleans_per_chan == 1:
+                data = numpy.zeros(array_shape, dtype=numpy.bool)
+                samples_read = _read_digital_lines(
+                    self._handle, data, number_of_samples_per_channel, timeout
+                ).samps_per_chan_read
+            else:
+                data = numpy.zeros(array_shape, dtype=numpy.uint32)
+                samples_read = _read_digital_u_32(
+                    self._handle, data, number_of_samples_per_channel, timeout)
+
+        # Counter Input
+        elif read_chan_type == ChannelType.COUNTER_INPUT:
+            meas_type = channels_to_read.ci_meas_type
+
+            if meas_type == UsageTypeCI.PULSE_FREQ:
+                frequencies = numpy.zeros(array_shape, dtype=numpy.float64)
+                duty_cycles = numpy.zeros(array_shape, dtype=numpy.float64)
+
+                samples_read = _read_ctr_freq(
+                    self._handle, frequencies, duty_cycles,
+                    number_of_samples_per_channel, timeout)
+
+                data = []
+                for f, d in zip(frequencies, duty_cycles):
+                    data.append(CtrFreq(freq=f, duty_cycle=d))
+
+            elif meas_type == UsageTypeCI.PULSE_TIME:
+                high_times = numpy.zeros(array_shape, dtype=numpy.float64)
+                low_times = numpy.zeros(array_shape, dtype=numpy.float64)
+
+                samples_read = _read_ctr_time(
+                    self._handle, high_times, low_times,
+                    number_of_samples_per_channel, timeout)
+                data = []
+                for h, l in zip(high_times, low_times):
+                    data.append(CtrTime(high_time=h, low_time=l))
+
+            elif meas_type == UsageTypeCI.PULSE_TICKS:
+                high_ticks = numpy.zeros(array_shape, dtype=numpy.uint32)
+                low_ticks = numpy.zeros(array_shape, dtype=numpy.uint32)
+
+                samples_read = _read_ctr_ticks(
+                    self._handle, high_ticks, low_ticks,
+                    number_of_samples_per_channel, timeout)
+                data = []
+                for h, l in zip(high_ticks, low_ticks):
+                    data.append(CtrTick(high_tick=h, low_tick=l))
+
+            elif meas_type == UsageTypeCI.COUNT_EDGES:
+                data = numpy.zeros(array_shape, dtype=numpy.uint32)
+
+                samples_read = _read_counter_u_32_ex(
+                    self._handle, data, number_of_samples_per_channel, timeout)
+
+            else:
+                data = numpy.zeros(array_shape, dtype=numpy.float64)
+
+                samples_read = _read_counter_f_64_ex(
+                    self._handle, data, number_of_samples_per_channel, timeout)
+        else:
+            raise DaqError(
+                'Read failed, because there are no channels in this task from '
+                'which data can be read.',
+                DAQmxErrors.READ_NO_INPUT_CHANS_IN_TASK.value,
+                task_name=self.name)
+
+        if (read_chan_type == ChannelType.COUNTER_INPUT and
+                (meas_type == UsageTypeCI.PULSE_FREQ or
+                         meas_type == UsageTypeCI.PULSE_TICKS or
+                         meas_type == UsageTypeCI.PULSE_TIME)):
+
+            if num_samples_not_set and array_shape == 1:
+                return data[0]
+            # Counter pulse measurements should not have N channel versions.
+            if samples_read != number_of_samples_per_channel:
+                return data[:samples_read]
+            return data
+
+        if num_samples_not_set and array_shape == 1:
+            return data.tolist()[0]
+
+        if samples_read != number_of_samples_per_channel:
+            if number_of_channels > 1:
+                return data[:,:samples_read].tolist()
+            else:
+                return data[:samples_read].tolist()
+
+        return data.tolist()
     def read(self, number_of_samples_per_channel=NUM_SAMPLES_UNSET,
              timeout=10.0):
         """
@@ -719,6 +836,7 @@ class Task(object):
                 return data[:samples_read].tolist()
 
         return data.tolist()
+
 
     def register_done_event(self, callback_method):
         """
